@@ -7,15 +7,50 @@ const {
   buyStock,
   sellStock,
   getTransactions,
+  getPortfolioHistory,
 } = require("../controllers/portfolioController");
 
 const router = express.Router();
 
-router.get("/", protect, getPortfolio);
+/* =========================================
+   CURRENT PORTFOLIO
+   ========================================= */
 
-router.post("/buy", protect, buyStock);
+router.get(
+  "/",
+  protect,
+  getPortfolio
+);
 
-router.post("/sell", protect, sellStock);
+/* =========================================
+   PORTFOLIO PERFORMANCE HISTORY
+   ========================================= */
+
+router.get(
+  "/history",
+  protect,
+  getPortfolioHistory
+);
+
+/* =========================================
+   BUY / SELL
+   ========================================= */
+
+router.post(
+  "/buy",
+  protect,
+  buyStock
+);
+
+router.post(
+  "/sell",
+  protect,
+  sellStock
+);
+
+/* =========================================
+   TRANSACTIONS
+   ========================================= */
 
 router.get(
   "/transactions",

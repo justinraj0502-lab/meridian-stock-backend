@@ -1,53 +1,103 @@
 const axios = require("axios");
+
 const Stock = require("../models/Stock");
 const PriceHistory = require("../models/PriceHistory");
 
-const TWELVE_DATA_API_KEY =
-  process.env.TWELVE_DATA_API_KEY;
+const {
+  getSmartApi,
+} = require("./angelOneService");
 
-const TWELVE_DATA_BASE_URL =
-  "https://api.twelvedata.com";
+/* =========================================
+   CONFIGURATION
+========================================= */
 
-const UPDATE_INTERVAL = 60 * 1000;
+const UPDATE_INTERVAL =
+  60 * 1000;
 
-// Maximum provider requests per cycle.
-// Twelve Data free plans are limited, so keep this conservative.
-const MAX_REQUESTS_PER_CYCLE = 3;
+const INSTRUMENT_MASTER_URL =
+  "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json";
 
-// After a symbol is rejected by the provider,
-// don't request it again for this long.
-const RESTRICTED_COOLDOWN =
-  30 * 60 * 1000;
+const MAX_STOCKS_PER_CYCLE = 50;
 
-// After hitting a rate limit, wait before trying again.
-const RATE_LIMIT_COOLDOWN =
-  5 * 60 * 1000;
+const ANGEL_ONE_EXCHANGE = "NSE";
 
-// In-memory provider status
-const restrictedSymbols = new Map();
-const supportedSymbols = new Set();
+const DATA_SOURCE =
+  "Angel One SmartAPI";
 
-let rateLimitedUntil = 0;
+/*
+ * Angel One instrument master is generated daily.
+ * Keep it cached for 6 hours.
+ */
+let instrumentMaster = null;
+
+let instrumentMasterLoadedAt = 0;
+
+const INSTRUMENT_MASTER_REFRESH =
+  6 * 60 * 60 * 1000;
+
 let updateRunning = false;
 
-/**
- * Save one successful provider snapshot.
- */
-const savePriceSnapshot = async (
+/* =========================================
+   SAVE MARKET SNAPSHOT
+========================================= */
+
+const savePriceSnapshot = async ({
   symbol,
   price,
-  source = "Twelve Data"
-) => {
+  open,
+  high,
+  low,
+  close,
+  volume,
+}) => {
   try {
+    const safePrice =
+      Number(price);
+
+    const safeOpen =
+      Number(open) || safePrice;
+
+    const safeHigh =
+      Number(high) || safePrice;
+
+    const safeLow =
+      Number(low) || safePrice;
+
+    const safeClose =
+      Number(close) || safePrice;
+
+    const safeVolume =
+      Number(volume) || 0;
+
     await PriceHistory.create({
       symbol,
-      price,
-      source,
-      capturedAt: new Date(),
+
+      open: safeOpen,
+
+      high: safeHigh,
+
+      low: safeLow,
+
+      close: safeClose,
+
+      price: safePrice,
+
+      volume: safeVolume,
+
+      source:
+        DATA_SOURCE,
+
+      interval:
+        "snapshot",
+
+      capturedAt:
+        new Date(),
     });
 
-    // Keep only the latest 1000 snapshots
-    // for each symbol.
+    /*
+     * Keep only latest 1000
+     * snapshots for each symbol.
+     */
     const oldSnapshots =
       await PriceHistory.find({
         symbol,
@@ -59,12 +109,16 @@ const savePriceSnapshot = async (
         .select("_id")
         .lean();
 
-    if (oldSnapshots.length > 0) {
+    if (
+      oldSnapshots.length > 0
+    ) {
       await PriceHistory.deleteMany({
         _id: {
-          $in: oldSnapshots.map(
-            (item) => item._id
-          ),
+          $in:
+            oldSnapshots.map(
+              (item) =>
+                item._id
+            ),
         },
       });
     }
@@ -76,155 +130,582 @@ const savePriceSnapshot = async (
   }
 };
 
-/**
- * Check whether a symbol is currently restricted.
- */
-const isSymbolRestricted = (symbol) => {
-  const restrictedUntil =
-    restrictedSymbols.get(symbol);
+/* =========================================
+   LOAD ANGEL ONE INSTRUMENT MASTER
+========================================= */
 
-  if (!restrictedUntil) {
-    return false;
-  }
+const loadInstrumentMaster =
+  async () => {
+    const cacheValid =
+      instrumentMaster &&
+      Date.now() -
+        instrumentMasterLoadedAt <
+        INSTRUMENT_MASTER_REFRESH;
 
-  if (Date.now() >= restrictedUntil) {
-    restrictedSymbols.delete(symbol);
-    return false;
-  }
-
-  return true;
-};
-
-/**
- * Mark a symbol as temporarily unsupported.
- */
-const markSymbolRestricted = (symbol) => {
-  restrictedSymbols.set(
-    symbol,
-    Date.now() + RESTRICTED_COOLDOWN
-  );
-};
-
-/**
- * Fetch one quote from Twelve Data.
- */
-const fetchQuote = async (symbol) => {
-  const response = await axios.get(
-    `${TWELVE_DATA_BASE_URL}/quote`,
-    {
-      params: {
-        symbol,
-        apikey: TWELVE_DATA_API_KEY,
-      },
-      timeout: 10000,
+    if (cacheValid) {
+      return instrumentMaster;
     }
-  );
 
-  return response.data;
-};
+    console.log(
+      "📚 Loading Angel One instrument master..."
+    );
 
-/**
- * Update one stock.
- */
-const updateStock = async (stock) => {
-  const symbol = stock.symbol;
-
-  if (isSymbolRestricted(symbol)) {
-    return {
-      success: false,
-      skipped: true,
-      reason: "restricted",
-    };
-  }
-
-  console.log(
-    `📡 Fetching live quote: ${symbol}`
-  );
-
-  try {
-    const data = await fetchQuote(symbol);
-
-    if (
-      data?.status === "error"
-    ) {
-      const message =
-        data?.message ||
-        "Provider returned an error";
-
-      // Twelve Data returns this type of message
-      // when the symbol is unavailable on the plan.
-      if (
-        message
-          .toLowerCase()
-          .includes("grow") ||
-        message
-          .toLowerCase()
-          .includes("venture") ||
-        message
-          .toLowerCase()
-          .includes("available")
-      ) {
-        console.log(
-          `⚠️ ${symbol}: Provider does not support this symbol on current plan`
+    try {
+      const response =
+        await axios.get(
+          INSTRUMENT_MASTER_URL,
+          {
+            timeout: 60000,
+          }
         );
 
-        markSymbolRestricted(symbol);
+      if (
+        !Array.isArray(
+          response.data
+        )
+      ) {
+        throw new Error(
+          "Invalid Angel One instrument master response"
+        );
+      }
 
-        return {
-          success: false,
-          restricted: true,
-        };
+      instrumentMaster =
+        response.data;
+
+      instrumentMasterLoadedAt =
+        Date.now();
+
+      console.log(
+        `✅ Angel One instrument master loaded: ${instrumentMaster.length} instruments`
+      );
+
+      return instrumentMaster;
+    } catch (error) {
+      console.error(
+        "❌ Failed to load Angel One instrument master:",
+        error.message
+      );
+
+      throw error;
+    }
+  };
+
+/* =========================================
+   NORMALIZE TEXT
+========================================= */
+
+const normalizeText = (
+  value
+) => {
+  return String(
+    value || ""
+  )
+    .trim()
+    .toUpperCase();
+};
+
+/* =========================================
+   CHECK NSE EQUITY INSTRUMENT
+========================================= */
+
+const isNseEquity =
+  (instrument) => {
+    const exchange =
+      normalizeText(
+        instrument.exch_seg
+      );
+
+    return (
+      exchange === "NSE_CM" ||
+      exchange === "NSE"
+    );
+  };
+
+/* =========================================
+   FIND NSE EQUITY TOKEN
+========================================= */
+
+const findNseEquityInstrument =
+  (
+    master,
+    symbol
+  ) => {
+    const normalizedSymbol =
+      normalizeText(symbol);
+
+    const expectedTradingSymbol =
+      `${normalizedSymbol}-EQ`;
+
+    /*
+     * METHOD 1
+     * Exact NSE trading symbol
+     */
+
+    const exact =
+      master.find(
+        (instrument) => {
+          return (
+            isNseEquity(
+              instrument
+            ) &&
+            normalizeText(
+              instrument.symbol
+            ) ===
+              expectedTradingSymbol
+          );
+        }
+      );
+
+    if (exact) {
+      return exact;
+    }
+
+    /*
+     * METHOD 2
+     * Symbol without relying
+     * on exchange case
+     */
+
+    const bySymbol =
+      master.find(
+        (instrument) => {
+          const instrumentSymbol =
+            normalizeText(
+              instrument.symbol
+            );
+
+          return (
+            isNseEquity(
+              instrument
+            ) &&
+            (
+              instrumentSymbol ===
+                normalizedSymbol ||
+              instrumentSymbol ===
+                expectedTradingSymbol
+            )
+          );
+        }
+      );
+
+    if (bySymbol) {
+      return bySymbol;
+    }
+
+    /*
+     * METHOD 3
+     * Company name + -EQ
+     */
+
+    const byName =
+      master.find(
+        (instrument) => {
+          const instrumentName =
+            normalizeText(
+              instrument.name
+            );
+
+          const instrumentSymbol =
+            normalizeText(
+              instrument.symbol
+            );
+
+          return (
+            isNseEquity(
+              instrument
+            ) &&
+            instrumentName ===
+              normalizedSymbol &&
+            instrumentSymbol.endsWith(
+              "-EQ"
+            )
+          );
+        }
+      );
+
+    if (byName) {
+      return byName;
+    }
+
+    /*
+     * DEBUG POSSIBLE MATCHES
+     */
+
+    const possibleMatches =
+      master
+        .filter(
+          (instrument) => {
+            if (
+              !isNseEquity(
+                instrument
+              )
+            ) {
+              return false;
+            }
+
+            const instrumentSymbol =
+              normalizeText(
+                instrument.symbol
+              );
+
+            const instrumentName =
+              normalizeText(
+                instrument.name
+              );
+
+            return (
+              instrumentSymbol.includes(
+                normalizedSymbol
+              ) ||
+              instrumentName.includes(
+                normalizedSymbol
+              )
+            );
+          }
+        )
+        .slice(0, 3);
+
+    if (
+      possibleMatches.length > 0
+    ) {
+      console.log(
+        `🔎 ${normalizedSymbol}: possible Angel One instruments:`,
+        possibleMatches.map(
+          (item) => ({
+            token:
+              item.token,
+
+            symbol:
+              item.symbol,
+
+            name:
+              item.name,
+
+            exch_seg:
+              item.exch_seg,
+          })
+        )
+      );
+    }
+
+    return null;
+  };
+
+/* =========================================
+   GET LIVE MARKET DATA
+========================================= */
+
+const fetchMarketData =
+  async (stocks) => {
+    const api =
+      await getSmartApi();
+
+    const master =
+      await loadInstrumentMaster();
+
+    const exchangeTokens = {
+      NSE: [],
+    };
+
+    const stockMappings = [];
+
+    for (const stock of stocks) {
+      const instrument =
+        findNseEquityInstrument(
+          master,
+          stock.symbol
+        );
+
+      if (!instrument) {
+        console.log(
+          `⚠️ ${stock.symbol}: NSE equity token not found`
+        );
+
+        continue;
       }
 
       console.log(
-        `⚠️ ${symbol}: ${message}`
+        `🎯 ${stock.symbol}: ${instrument.symbol} | token ${instrument.token}`
       );
 
-      return {
-        success: false,
-        error: message,
-      };
+      exchangeTokens.NSE.push(
+        String(
+          instrument.token
+        )
+      );
+
+      stockMappings.push({
+        stock,
+        instrument,
+      });
     }
 
-    const price = Number(
-      data?.close
+    if (
+      exchangeTokens.NSE.length === 0
+    ) {
+      return [];
+    }
+
+    console.log(
+      `📡 Requesting Angel One market data for ${exchangeTokens.NSE.length} NSE instruments...`
     );
 
-    if (!Number.isFinite(price) || price <= 0) {
+    /*
+     * Angel One SmartAPI FULL quote.
+     */
+    const response =
+      await api.marketData({
+        mode: "FULL",
+        exchangeTokens,
+      });
+
+    if (
+      !response ||
+      response.status !== true
+    ) {
+      throw new Error(
+        response?.message ||
+          "Angel One market data request failed"
+      );
+    }
+
+    const fetchedData =
+      response.data || {};
+
+    const fetchedItems =
+      Array.isArray(
+        fetchedData.fetched
+      )
+        ? fetchedData.fetched
+        : [];
+
+    console.log(
+      `📊 Angel One returned ${fetchedItems.length} market records`
+    );
+
+    const results = [];
+
+    for (const mapping of stockMappings) {
+      const token =
+        String(
+          mapping.instrument.token
+        );
+
+      const marketItem =
+        fetchedItems.find(
+          (item) =>
+            String(
+              item.symbolToken
+            ) === token
+        );
+
+      if (!marketItem) {
+        console.log(
+          `⚠️ ${mapping.stock.symbol}: No market data returned for token ${token}`
+        );
+
+        continue;
+      }
+
+      results.push({
+        stock:
+          mapping.stock,
+
+        instrument:
+          mapping.instrument,
+
+        marketData:
+          marketItem,
+      });
+    }
+
+    return results;
+  };
+
+/* =========================================
+   FETCH REAL HISTORICAL OHLC CANDLES
+========================================= */
+
+/*
+ * Angel One SmartAPI historical endpoint:
+ *
+ * getCandleData({
+ *   exchange: "NSE",
+ *   symboltoken: "3045",
+ *   interval: "ONE_MINUTE",
+ *   fromdate: "YYYY-MM-DD HH:mm",
+ *   todate: "YYYY-MM-DD HH:mm"
+ * })
+ *
+ * This function is intentionally separate
+ * from the live updater.
+ *
+ * The controller can use it when the frontend
+ * requests actual historical chart data.
+ */
+
+const fetchHistoricalCandles =
+  async ({
+    symbolToken,
+    interval,
+    fromDate,
+    toDate,
+  }) => {
+    try {
+      if (
+        !symbolToken ||
+        !interval ||
+        !fromDate ||
+        !toDate
+      ) {
+        throw new Error(
+          "Historical candle parameters are incomplete"
+        );
+      }
+
+      const api =
+        await getSmartApi();
+
       console.log(
-        `⚠️ ${symbol}: Invalid provider price`
+        `📈 Fetching Angel One historical candles: token ${symbolToken} | ${interval} | ${fromDate} → ${toDate}`
+      );
+
+      const response =
+        await api.getCandleData({
+          exchange:
+            ANGEL_ONE_EXCHANGE,
+
+          symboltoken:
+            String(
+              symbolToken
+            ),
+
+          interval,
+
+          fromdate:
+            fromDate,
+
+          todate:
+            toDate,
+        });
+
+      if (
+        !response ||
+        response.status !== true
+      ) {
+        throw new Error(
+          response?.message ||
+            "Angel One historical candle request failed"
+        );
+      }
+
+      const candles =
+        Array.isArray(
+          response.data
+        )
+          ? response.data
+          : [];
+
+      console.log(
+        `📈 Angel One returned ${candles.length} historical candles`
+      );
+
+      return candles;
+    } catch (error) {
+      console.error(
+        "❌ Angel One historical candle error:",
+        error?.message ||
+          error
+      );
+
+      if (
+        error?.response?.data
+      ) {
+        console.error(
+          "Angel One historical response:",
+          error.response.data
+        );
+      }
+
+      throw error;
+    }
+  };
+
+/* =========================================
+   UPDATE STOCK DOCUMENT
+========================================= */
+
+const updateStockFromMarketData =
+  async ({
+    stock,
+    instrument,
+    marketData,
+  }) => {
+    const symbol =
+      stock.symbol;
+
+    const price =
+      Number(
+        marketData.ltp
+      );
+
+    if (
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      console.log(
+        `⚠️ ${symbol}: Invalid Angel One LTP`
       );
 
       return {
         success: false,
-        error: "Invalid price",
+        error: "Invalid LTP",
       };
     }
 
     const previousClose =
-      Number(data?.previous_close) ||
-      Number(stock.previousClose) ||
+      Number(
+        marketData.close
+      ) ||
+      Number(
+        stock.previousClose
+      ) ||
       price;
 
     const change =
-      price - previousClose;
+      price -
+      previousClose;
 
     const changePercent =
       previousClose > 0
-        ? (change / previousClose) * 100
+        ? (change /
+            previousClose) *
+          100
         : 0;
 
     const open =
-      Number(data?.open) || price;
+      Number(
+        marketData.open
+      ) || price;
 
     const high =
-      Number(data?.high) || price;
+      Number(
+        marketData.high
+      ) || price;
 
     const low =
-      Number(data?.low) || price;
+      Number(
+        marketData.low
+      ) || price;
 
     const volume =
-      Number(data?.volume) || 0;
+      Number(
+        marketData.tradeVolume
+      ) ||
+      Number(
+        marketData.volume
+      ) ||
+      0;
 
     await Stock.updateOne(
       {
@@ -233,231 +714,200 @@ const updateStock = async (stock) => {
       {
         $set: {
           price,
+
           previousClose,
+
           change,
+
           changePercent,
+
           open,
+
           high,
+
           low,
+
           volume,
-          dataSource: "Twelve Data",
+
+          dataSource:
+            DATA_SOURCE,
+
           isLive: true,
-          lastUpdated: new Date(),
+
+          lastUpdated:
+            new Date(),
+
+          exchange:
+            ANGEL_ONE_EXCHANGE,
+
+          symbolToken:
+            String(
+              instrument.token
+            ),
+
+          tradingSymbol:
+            instrument.symbol,
         },
       }
     );
 
-    await savePriceSnapshot(
+    /*
+     * Save the complete live snapshot.
+     *
+     * This now stores OHLCV instead of
+     * only the LTP.
+     */
+    await savePriceSnapshot({
       symbol,
+
       price,
-      "Twelve Data"
-    );
-    supportedSymbols.add(symbol);
+
+      open,
+
+      high,
+
+      low,
+
+      close:
+        previousClose,
+
+      volume,
+    });
 
     console.log(
-      `✅ ${symbol}: ₹${price} live snapshot saved`
+      `✅ ${symbol}: ₹${price} live Angel One snapshot saved`
     );
 
     return {
       success: true,
+
       symbol,
+
       price,
+
+      open,
+
+      high,
+
+      low,
+
+      volume,
     };
-  } catch (error) {
-    const status =
-      error?.response?.status;
+  };
 
-    const providerMessage =
-      error?.response?.data?.message;
+/* =========================================
+   UPDATE MARKET
+========================================= */
 
-    if (status === 429) {
+const updateMarket =
+  async () => {
+    if (updateRunning) {
       console.log(
-        "⚠️ Twelve Data rate limit reached."
-      );
-
-      rateLimitedUntil =
-        Date.now() +
-        RATE_LIMIT_COOLDOWN;
-
-      return {
-        success: false,
-        rateLimited: true,
-      };
-    }
-
-    if (status === 401) {
-      console.log(
-        `⚠️ ${symbol}: Twelve Data authentication failed`
-      );
-
-      return {
-        success: false,
-        authenticationError: true,
-      };
-    }
-
-    if (status === 404) {
-      console.log(
-        `⚠️ ${symbol}: Provider does not support this symbol`
-      );
-
-      markSymbolRestricted(symbol);
-
-      return {
-        success: false,
-        restricted: true,
-      };
-    }
-
-    console.log(
-      `⚠️ ${symbol}: ${
-        providerMessage ||
-        error.message
-      }`
-    );
-
-    return {
-      success: false,
-      error:
-        providerMessage ||
-        error.message,
-    };
-  }
-};
-
-/**
- * Run one market update cycle.
- */
-const updateMarket = async () => {
-  if (updateRunning) {
-    console.log(
-      "⏳ Previous market update is still running. Skipping cycle."
-    );
-
-    return;
-  }
-
-  if (Date.now() < rateLimitedUntil) {
-    const remaining = Math.ceil(
-      (rateLimitedUntil - Date.now()) /
-        1000
-    );
-
-    console.log(
-      `⏸️ Provider cooldown active. Next attempt in ${remaining}s.`
-    );
-
-    return;
-  }
-
-  updateRunning = true;
-
-  try {
-    const stocks = await Stock.find({})
-  .lean();
-
-stocks.sort((a, b) => {
-  const aSupported = supportedSymbols.has(
-    a.symbol
-  );
-
-  const bSupported = supportedSymbols.has(
-    b.symbol
-  );
-
-  if (aSupported && !bSupported) {
-    return -1;
-  }
-
-  if (!aSupported && bSupported) {
-    return 1;
-  }
-
-  return a.symbol.localeCompare(
-    b.symbol
-  );
-});
-
-    if (!stocks.length) {
-      console.log(
-        "⚠️ No stocks available for live update."
+        "⏳ Previous market update is still running. Skipping cycle."
       );
 
       return;
     }
 
-    let requestCount = 0;
+    updateRunning = true;
 
-    for (const stock of stocks) {
-      if (
-        requestCount >=
-        MAX_REQUESTS_PER_CYCLE
-      ) {
+    try {
+      const stocks =
+        await Stock.find({})
+          .lean();
+
+      if (!stocks.length) {
         console.log(
-          "⏭️ Request limit for this cycle reached."
+          "⚠️ No stocks available for live update."
         );
 
-        break;
+        return;
       }
 
-      if (
-        isSymbolRestricted(
-          stock.symbol
-        )
-      ) {
-        continue;
-      }
-
-      requestCount++;
-
-      const result =
-        await updateStock(stock);
-
-      if (result.rateLimited) {
-        console.log(
-          "🛑 Stopping current cycle because provider rate limit was reached."
+      const stocksToUpdate =
+        stocks.slice(
+          0,
+          MAX_STOCKS_PER_CYCLE
         );
 
-        break;
-      }
-
-      // Small delay between requests.
-      // This avoids firing requests back-to-back.
-      await new Promise(
-        (resolve) =>
-          setTimeout(resolve, 1500)
+      console.log(
+        `📡 Fetching Angel One market data for ${stocksToUpdate.length} stocks...`
       );
+
+      const results =
+        await fetchMarketData(
+          stocksToUpdate
+        );
+
+      if (!results.length) {
+        console.log(
+          "⚠️ Angel One returned no market data."
+        );
+
+        return;
+      }
+
+      for (const result of results) {
+        await updateStockFromMarketData(
+          result
+        );
+      }
+
+      console.log(
+        `📊 Angel One market update completed: ${results.length}/${stocksToUpdate.length} stocks`
+      );
+    } catch (error) {
+      console.error(
+        "❌ Angel One market updater error:",
+        error.message
+      );
+
+      if (
+        error?.response?.data
+      ) {
+        console.error(
+          "Angel One response:",
+          error.response.data
+        );
+      }
+    } finally {
+      updateRunning = false;
     }
-  } catch (error) {
-    console.error(
-      "❌ Market updater error:",
-      error.message
+  };
+
+/* =========================================
+   START LIVE MARKET UPDATER
+========================================= */
+
+const startLiveMarketUpdater =
+  () => {
+    console.log(
+      "📡 Meridian Angel One live market updater started."
     );
-  } finally {
-    updateRunning = false;
-  }
-};
 
-/**
- * Start the live updater.
- */
-const startLiveMarketUpdater = () => {
-  console.log(
-    "📡 Meridian live market updater started."
-  );
+    /*
+     * First update after startup.
+     */
+    setTimeout(() => {
+      updateMarket();
+    }, 5000);
 
-  // First update after a short delay.
-  setTimeout(() => {
-    updateMarket();
-  }, 3000);
+    /*
+     * Continue every 60 seconds.
+     */
+    setInterval(() => {
+      updateMarket();
+    }, UPDATE_INTERVAL);
+  };
 
-  // Continue periodically.
-  setInterval(() => {
-    updateMarket();
-  }, UPDATE_INTERVAL);
-};
+/* =========================================
+   EXPORTS
+========================================= */
 
 module.exports = {
   startLiveMarketUpdater,
+
   updateMarket,
+
+  fetchHistoricalCandles,
 };

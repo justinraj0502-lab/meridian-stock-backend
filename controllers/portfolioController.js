@@ -1,6 +1,7 @@
 const User = require("../models/User");
 const Stock = require("../models/Stock");
 const Portfolio = require("../models/Portfolio");
+const PortfolioHistory = require("../models/PortfolioHistory");
 const Transaction = require("../models/Transaction");
 
 /* =========================================
@@ -27,9 +28,113 @@ const parseQuantity = (value) => {
 };
 
 const roundMoney = (value) => {
-  return Math.round(
-    (Number(value) + Number.EPSILON) * 100
-  ) / 100;
+  return (
+    Math.round(
+      (Number(value) + Number.EPSILON) * 100
+    ) / 100
+  );
+};
+
+/* =========================================
+   SAVE PORTFOLIO SNAPSHOT
+   ========================================= */
+
+const savePortfolioSnapshot = async ({
+  userId,
+  totalInvested,
+  totalValue,
+  totalProfitLoss,
+  cashBalance,
+}) => {
+  try {
+    const latestSnapshot =
+      await PortfolioHistory.findOne({
+        user: userId,
+      })
+        .sort({
+          capturedAt: -1,
+        })
+        .lean();
+
+    const now = Date.now();
+
+    /*
+     * Don't create a new snapshot on every
+     * portfolio refresh.
+     *
+     * One snapshot every 15 minutes is enough
+     * for the long-term performance chart.
+     */
+
+    if (latestSnapshot) {
+      const lastCapturedAt =
+        new Date(
+          latestSnapshot.capturedAt
+        ).getTime();
+
+      const fifteenMinutes =
+        15 * 60 * 1000;
+
+      if (
+        Number.isFinite(
+          lastCapturedAt
+        ) &&
+        now - lastCapturedAt <
+          fifteenMinutes
+      ) {
+        return latestSnapshot;
+      }
+    }
+
+    const holdingsValue =
+      roundMoney(
+        Number(totalValue) || 0
+      );
+
+    const snapshot =
+      await PortfolioHistory.create({
+        user: userId,
+
+        totalInvested:
+          roundMoney(
+            totalInvested
+          ),
+
+        totalValue:
+          holdingsValue,
+
+        totalProfitLoss:
+          roundMoney(
+            totalProfitLoss
+          ),
+
+        cashBalance:
+          roundMoney(
+            cashBalance
+          ),
+
+        holdingsValue:
+          holdingsValue,
+
+        capturedAt:
+          new Date(),
+      });
+
+    return snapshot;
+  } catch (error) {
+    /*
+     * Portfolio history is supplementary.
+     * A history failure should never stop the
+     * normal portfolio API from working.
+     */
+
+    console.error(
+      "Portfolio snapshot error:",
+      error?.message || error
+    );
+
+    return null;
+  }
 };
 
 /* =========================================
@@ -79,13 +184,11 @@ const getPortfolio = async (req, res) => {
           /*
            * Use the latest stored market price.
            *
-           * If the stock is temporarily missing
-           * from the market database, use the
-           * holding's average price only as a
+           * If the stock is temporarily missing,
+           * average price is used only as a
            * calculation safeguard.
-           *
-           * This is NOT presented as a live quote.
            */
+
           const currentPrice =
             stock &&
             Number.isFinite(
@@ -181,10 +284,14 @@ const getPortfolio = async (req, res) => {
       );
 
     totalValue =
-      roundMoney(totalValue);
+      roundMoney(
+        totalValue
+      );
 
     totalInvested =
-      roundMoney(totalInvested);
+      roundMoney(
+        totalInvested
+      );
 
     const totalProfitLoss =
       roundMoney(
@@ -212,6 +319,29 @@ const getPortfolio = async (req, res) => {
 
     await portfolio.save();
 
+    const balance =
+      roundMoney(
+        req.user.balance
+      );
+
+    /*
+     * Save periodic portfolio valuation.
+     */
+
+    await savePortfolioSnapshot({
+      userId:
+        req.user._id,
+
+      totalInvested,
+
+      totalValue,
+
+      totalProfitLoss,
+
+      cashBalance:
+        balance,
+    });
+
     return res.json({
       success: true,
 
@@ -229,10 +359,7 @@ const getPortfolio = async (req, res) => {
         totalProfitLossPercent,
       },
 
-      balance:
-        roundMoney(
-          req.user.balance
-        ),
+      balance,
     });
   } catch (error) {
     console.error(
@@ -247,6 +374,150 @@ const getPortfolio = async (req, res) => {
     });
   }
 };
+
+/* =========================================
+   GET PORTFOLIO HISTORY
+   ========================================= */
+
+const getPortfolioHistory =
+  async (req, res) => {
+    try {
+      const requestedInterval =
+        String(
+          req.query.interval || "3M"
+        )
+          .trim()
+          .toUpperCase();
+
+      const validIntervals = [
+        "3M",
+        "1Y",
+        "2Y",
+      ];
+
+      const interval =
+        validIntervals.includes(
+          requestedInterval
+        )
+          ? requestedInterval
+          : "3M";
+
+      const now =
+        new Date();
+
+      const fromDate =
+        new Date(now);
+
+      if (interval === "3M") {
+        fromDate.setMonth(
+          fromDate.getMonth() - 3
+        );
+      }
+
+      if (interval === "1Y") {
+        fromDate.setFullYear(
+          fromDate.getFullYear() - 1
+        );
+      }
+
+      if (interval === "2Y") {
+        fromDate.setFullYear(
+          fromDate.getFullYear() - 2
+        );
+      }
+
+      const history =
+        await PortfolioHistory.find({
+          user: req.user._id,
+
+          capturedAt: {
+            $gte: fromDate,
+            $lte: now,
+          },
+        })
+          .sort({
+            capturedAt: 1,
+          })
+          .lean();
+
+      /*
+       * Format the response specifically for
+       * the React performance chart.
+       */
+
+      const performance =
+        history.map(
+          (item) => ({
+            date:
+              item.capturedAt,
+
+            timestamp:
+              new Date(
+                item.capturedAt
+              ).getTime(),
+
+            totalValue:
+              roundMoney(
+                item.totalValue
+              ),
+
+            totalInvested:
+              roundMoney(
+                item.totalInvested
+              ),
+
+            totalProfitLoss:
+              roundMoney(
+                item.totalProfitLoss
+              ),
+
+            cashBalance:
+              roundMoney(
+                item.cashBalance
+              ),
+
+            holdingsValue:
+              roundMoney(
+                item.holdingsValue
+              ),
+          })
+        );
+
+      return res.json({
+        success: true,
+
+        interval,
+
+        from:
+          fromDate,
+
+        to:
+          now,
+
+        count:
+          performance.length,
+
+        source:
+          "MongoDB PortfolioHistory",
+
+        fallback: false,
+
+        history:
+          performance,
+      });
+    } catch (error) {
+      console.error(
+        "Portfolio history error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Unable to load portfolio performance history.",
+      });
+    }
+  };
 
 /* =========================================
    BUY STOCK
@@ -318,11 +589,10 @@ const buyStock = async (req, res) => {
     }
 
     /*
-     * IMPORTANT:
-     *
-     * This is the exact price stored in
-     * MongoDB when the order is processed.
+     * Exact price stored in MongoDB when
+     * the virtual order is processed.
      */
+
     const executionPrice =
       marketPrice;
 
@@ -464,14 +734,14 @@ const buyStock = async (req, res) => {
       );
 
     /* =====================================
-       SAVE PORTFOLIO
+       SAVE
        ===================================== */
 
     await user.save();
     await portfolio.save();
 
     /* =====================================
-       TRANSACTION RECORD
+       TRANSACTION
        ===================================== */
 
     const transaction =
@@ -863,8 +1133,10 @@ const getTransactions =
 
       return res.json({
         success: true,
+
         count:
           transactions.length,
+
         transactions,
       });
     } catch (error) {
@@ -887,6 +1159,7 @@ const getTransactions =
 
 module.exports = {
   getPortfolio,
+  getPortfolioHistory,
   buyStock,
   sellStock,
   getTransactions,

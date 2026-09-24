@@ -1,24 +1,39 @@
-const axios = require("axios");
 const Stock = require("../models/Stock");
-const PriceHistory = require("../models/PriceHistory");
 
-const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
-const TWELVE_DATA_BASE_URL = "https://api.twelvedata.com";
+const {
+  fetchHistoricalCandles,
+} = require("../services/liveMarketService");
 
-const historyCache = new Map();
+
+/* =========================================================
+   HISTORY CACHE
+========================================================= */
+
+const historyCache =
+  new Map();
+
+const HISTORY_CACHE_TIME =
+  60 * 1000;
+
+
+/* =========================================================
+   VALID INTERVALS
+========================================================= */
 
 const VALID_INTERVALS = {
   "1day": {
     days: 90,
-    outputsize: 90,
+    angelInterval: "ONE_DAY",
   },
+
   "1week": {
     days: 365,
-    outputsize: 52,
+    angelInterval: "ONE_DAY",
   },
+
   "1month": {
     days: 730,
-    outputsize: 24,
+    angelInterval: "ONE_DAY",
   },
 };
 
@@ -27,19 +42,29 @@ const VALID_INTERVALS = {
    GET ALL STOCKS
 ========================================================= */
 
-const getStocks = async (req, res) => {
+const getStocks = async (
+  req,
+  res
+) => {
   try {
-    const stocks = await Stock.find({})
-      .sort({ symbol: 1 })
-      .lean();
+    const stocks =
+      await Stock.find({})
+        .sort({
+          symbol: 1,
+        })
+        .lean();
 
     res.json(stocks);
   } catch (error) {
-    console.error("Get stocks error:", error);
+    console.error(
+      "Get stocks error:",
+      error
+    );
 
     res.status(500).json({
       success: false,
-      message: "Failed to fetch stocks",
+      message:
+        "Failed to fetch stocks",
     });
   }
 };
@@ -49,380 +74,733 @@ const getStocks = async (req, res) => {
    GET SINGLE STOCK
 ========================================================= */
 
-const getStock = async (req, res) => {
+const getStock = async (
+  req,
+  res
+) => {
   try {
-    const symbol = String(req.params.symbol || "")
-      .trim()
-      .toUpperCase();
+    const symbol =
+      String(
+        req.params.symbol ||
+          ""
+      )
+        .trim()
+        .toUpperCase();
 
     if (!symbol) {
       return res.status(400).json({
         success: false,
-        message: "Stock symbol is required",
+        message:
+          "Stock symbol is required",
       });
     }
 
-    const stock = await Stock.findOne({
-      symbol,
-    }).lean();
+    const stock =
+      await Stock.findOne({
+        symbol,
+      }).lean();
 
     if (!stock) {
       return res.status(404).json({
         success: false,
-        message: "Stock not found",
+        message:
+          "Stock not found",
       });
     }
 
     res.json(stock);
   } catch (error) {
-    console.error("Get stock error:", error);
+    console.error(
+      "Get stock error:",
+      error
+    );
 
     res.status(500).json({
       success: false,
-      message: "Failed to fetch stock",
+      message:
+        "Failed to fetch stock",
     });
   }
 };
 
 
 /* =========================================================
-   FORMAT STORED SNAPSHOTS
+   FORMAT ANGEL ONE CANDLE
 ========================================================= */
 
-const formatStoredHistory = (snapshots, interval) => {
-  if (!snapshots.length) {
-    return [];
-  }
+/*
+ * Angel One candle format:
+ *
+ * [
+ *   timestamp,
+ *   open,
+ *   high,
+ *   low,
+ *   close,
+ *   volume
+ * ]
+ */
 
-  /*
-    We receive snapshots newest → oldest.
+const formatCandle =
+  (candle) => {
+    if (
+      !Array.isArray(candle) ||
+      candle.length < 6
+    ) {
+      return null;
+    }
 
-    Convert them to chronological order first.
-  */
+    const timestamp =
+      candle[0];
 
-  const chronological = [...snapshots].sort(
-    (a, b) =>
-      new Date(a.capturedAt) -
-      new Date(b.capturedAt)
-  );
+    const open =
+      Number(candle[1]);
 
-  /*
-    For 1day:
-    Keep each captured snapshot.
+    const high =
+      Number(candle[2]);
 
-    For 1week / 1month:
-    Keep the latest snapshot from each period.
-  */
+    const low =
+      Number(candle[3]);
 
-  if (interval === "1day") {
-    return chronological.map((item) => ({
-      date: item.capturedAt,
-      close: Number(item.price),
-      source: item.source || "Meridian snapshot",
-    }));
-  }
+    const close =
+      Number(candle[4]);
 
-  const buckets = new Map();
+    const volume =
+      Number(candle[5]) || 0;
 
-  for (const item of chronological) {
-    const date = new Date(item.capturedAt);
+    if (
+      !timestamp ||
+      !Number.isFinite(open) ||
+      !Number.isFinite(high) ||
+      !Number.isFinite(low) ||
+      !Number.isFinite(close)
+    ) {
+      return null;
+    }
 
-    let key;
+    return {
+      date: timestamp,
 
-    if (interval === "1week") {
-      const year = date.getUTCFullYear();
+      open,
 
-      const firstDay = new Date(
-        Date.UTC(year, 0, 1)
+      high,
+
+      low,
+
+      close,
+
+      volume,
+
+      source:
+        "Angel One SmartAPI",
+    };
+  };
+
+
+/* =========================================================
+   FORMAT DAILY HISTORY
+========================================================= */
+
+const formatDailyHistory =
+  (candles) => {
+    return candles
+      .map(formatCandle)
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          new Date(a.date) -
+          new Date(b.date)
+      );
+  };
+
+
+/* =========================================================
+   FORMAT WEEKLY HISTORY
+========================================================= */
+
+/*
+ * Angel One gives us ONE_DAY candles.
+ *
+ * We aggregate them into weekly candles:
+ *
+ * Open   = first trading day's open
+ * High   = highest high
+ * Low    = lowest low
+ * Close  = last trading day's close
+ * Volume = total volume
+ */
+
+const formatWeeklyHistory =
+  (candles) => {
+    const daily =
+      formatDailyHistory(
+        candles
       );
 
-      const diff =
-        Math.floor(
-          (date - firstDay) /
-            (1000 * 60 * 60 * 24)
+    const buckets =
+      new Map();
+
+    for (const candle of daily) {
+      const date =
+        new Date(
+          candle.date
         );
 
-      const week = Math.floor(diff / 7);
+      const day =
+        date.getUTCDay();
 
-      key = `${year}-W${week}`;
-    } else {
-      key = `${date.getUTCFullYear()}-${String(
-        date.getUTCMonth() + 1
-      ).padStart(2, "0")}`;
+      const difference =
+        day === 0
+          ? 6
+          : day - 1;
+
+      const weekStart =
+        new Date(date);
+
+      weekStart.setUTCDate(
+        date.getUTCDate() -
+          difference
+      );
+
+      weekStart.setUTCHours(
+        0,
+        0,
+        0,
+        0
+      );
+
+      const key =
+        weekStart
+          .toISOString()
+          .slice(0, 10);
+
+      if (
+        !buckets.has(key)
+      ) {
+        buckets.set(
+          key,
+          {
+            date:
+              candle.date,
+
+            open:
+              candle.open,
+
+            high:
+              candle.high,
+
+            low:
+              candle.low,
+
+            close:
+              candle.close,
+
+            volume:
+              candle.volume,
+
+            source:
+              "Angel One SmartAPI",
+          }
+        );
+
+        continue;
+      }
+
+      const bucket =
+        buckets.get(key);
+
+      bucket.high =
+        Math.max(
+          bucket.high,
+          candle.high
+        );
+
+      bucket.low =
+        Math.min(
+          bucket.low,
+          candle.low
+        );
+
+      bucket.close =
+        candle.close;
+
+      bucket.volume +=
+        candle.volume;
+
+      bucket.date =
+        candle.date;
     }
 
-    buckets.set(key, item);
-  }
-
-  return Array.from(buckets.values()).map(
-    (item) => ({
-      date: item.capturedAt,
-      close: Number(item.price),
-      source: item.source || "Meridian snapshot",
-    })
-  );
-};
-
-
-/* =========================================================
-   GET STORED MERIDIAN HISTORY
-========================================================= */
-
-const getStoredHistory = async (
-  symbol,
-  interval
-) => {
-  const config = VALID_INTERVALS[interval];
-
-  if (!config) {
-    return [];
-  }
-
-  const startDate = new Date();
-
-  startDate.setDate(
-    startDate.getDate() - config.days
-  );
-
-  const snapshots = await PriceHistory.find({
-    symbol,
-    capturedAt: {
-      $gte: startDate,
-    },
-  })
-    .sort({
-      capturedAt: -1,
-    })
-    .limit(1000)
-    .lean();
-
-  return formatStoredHistory(
-    snapshots,
-    interval
-  );
-};
-
-
-/* =========================================================
-   TWELVE DATA HISTORY
-========================================================= */
-
-const getTwelveDataHistory = async (
-  symbol,
-  interval
-) => {
-  const config = VALID_INTERVALS[interval];
-
-  const response = await axios.get(
-    `${TWELVE_DATA_BASE_URL}/time_series`,
-    {
-      params: {
-        symbol,
-        interval,
-        outputsize: config.outputsize,
-        apikey: TWELVE_DATA_API_KEY,
-      },
-      timeout: 10000,
-    }
-  );
-
-  const data = response.data;
-
-  if (
-    data?.status === "error" ||
-    !Array.isArray(data?.values)
-  ) {
-    throw new Error(
-      data?.message ||
-        "Historical data unavailable"
+    return Array.from(
+      buckets.values()
     );
-  }
+  };
 
-  return data.values
-    .map((item) => ({
-      date: item.datetime,
-      close: Number(item.close),
-      open: Number(item.open),
-      high: Number(item.high),
-      low: Number(item.low),
-      volume: Number(item.volume || 0),
-      source: "Twelve Data",
-    }))
-    .filter(
-      (item) =>
-        Number.isFinite(item.close)
-    )
-    .reverse();
-};
+
+/* =========================================================
+   FORMAT MONTHLY HISTORY
+========================================================= */
+
+/*
+ * Aggregate daily candles into
+ * monthly OHLC candles.
+ */
+
+const formatMonthlyHistory =
+  (candles) => {
+    const daily =
+      formatDailyHistory(
+        candles
+      );
+
+    const buckets =
+      new Map();
+
+    for (const candle of daily) {
+      const date =
+        new Date(
+          candle.date
+        );
+
+      const key =
+        `${date.getUTCFullYear()}-${String(
+          date.getUTCMonth() + 1
+        ).padStart(2, "0")}`;
+
+      if (
+        !buckets.has(key)
+      ) {
+        buckets.set(
+          key,
+          {
+            date:
+              candle.date,
+
+            open:
+              candle.open,
+
+            high:
+              candle.high,
+
+            low:
+              candle.low,
+
+            close:
+              candle.close,
+
+            volume:
+              candle.volume,
+
+            source:
+              "Angel One SmartAPI",
+          }
+        );
+
+        continue;
+      }
+
+      const bucket =
+        buckets.get(key);
+
+      bucket.high =
+        Math.max(
+          bucket.high,
+          candle.high
+        );
+
+      bucket.low =
+        Math.min(
+          bucket.low,
+          candle.low
+        );
+
+      bucket.close =
+        candle.close;
+
+      bucket.volume +=
+        candle.volume;
+
+      bucket.date =
+        candle.date;
+    }
+
+    return Array.from(
+      buckets.values()
+    );
+  };
+
+
+/* =========================================================
+   FORMAT ANGEL ONE DATE
+========================================================= */
+
+const formatAngelDate =
+  (date) => {
+    const year =
+      date.getFullYear();
+
+    const month =
+      String(
+        date.getMonth() + 1
+      ).padStart(2, "0");
+
+    const day =
+      String(
+        date.getDate()
+      ).padStart(2, "0");
+
+    const hours =
+      String(
+        date.getHours()
+      ).padStart(2, "0");
+
+    const minutes =
+      String(
+        date.getMinutes()
+      ).padStart(2, "0");
+
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
+  };
+
+
+/* =========================================================
+   GET ANGEL ONE HISTORY
+========================================================= */
+
+const getAngelOneHistory =
+  async ({
+    stock,
+    interval,
+  }) => {
+    const config =
+      VALID_INTERVALS[
+        interval
+      ];
+
+    if (!config) {
+      return [];
+    }
+
+    if (
+      !stock.symbolToken
+    ) {
+      throw new Error(
+        `Angel One symbol token is missing for ${stock.symbol}`
+      );
+    }
+
+    /*
+     * Angel One historical API
+     * works with date/time strings.
+     */
+
+    const toDate =
+      new Date();
+
+    const fromDate =
+      new Date();
+
+    fromDate.setDate(
+      fromDate.getDate() -
+        config.days
+    );
+
+    const from =
+      formatAngelDate(
+        fromDate
+      );
+
+    const to =
+      formatAngelDate(
+        toDate
+      );
+
+    console.log(
+      `📈 Requesting real Angel One history: ${stock.symbol} | ${config.angelInterval} | ${from} → ${to}`
+    );
+
+    const candles =
+      await fetchHistoricalCandles({
+        symbolToken:
+          stock.symbolToken,
+
+        interval:
+          config.angelInterval,
+
+        fromDate:
+          from,
+
+        toDate:
+          to,
+      });
+
+    if (
+      !Array.isArray(
+        candles
+      )
+    ) {
+      return [];
+    }
+
+    if (
+      interval === "1day"
+    ) {
+      return formatDailyHistory(
+        candles
+      );
+    }
+
+    if (
+      interval === "1week"
+    ) {
+      return formatWeeklyHistory(
+        candles
+      );
+    }
+
+    if (
+      interval === "1month"
+    ) {
+      return formatMonthlyHistory(
+        candles
+      );
+    }
+
+    return [];
+  };
 
 
 /* =========================================================
    GET STOCK HISTORY
 ========================================================= */
 
-const getStockHistory = async (req, res) => {
-  const symbol = String(
-    req.params.symbol || ""
-  )
-    .trim()
-    .toUpperCase();
+const getStockHistory =
+  async (
+    req,
+    res
+  ) => {
+    const symbol =
+      String(
+        req.params.symbol ||
+          ""
+      )
+        .trim()
+        .toUpperCase();
 
-  const interval =
-    String(
-      req.query.interval || "1day"
-    ).trim();
-
-  try {
-    if (!VALID_INTERVALS[interval]) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Invalid interval. Use 1day, 1week or 1month.",
-      });
-    }
-
-    const stock = await Stock.findOne({
-      symbol,
-    }).lean();
-
-    if (!stock) {
-      return res.status(404).json({
-        success: false,
-        message: "Stock not found",
-      });
-    }
-
-    const cacheKey = `${symbol}_${interval}`;
-
-    const cached = historyCache.get(
-      cacheKey
-    );
-
-    if (
-      cached &&
-      Date.now() - cached.timestamp < 5 * 60 * 1000
-    ) {
-      return res.json(cached.data);
-    }
-
-
-    /* -----------------------------------------------------
-       1. Try Twelve Data historical API
-    ----------------------------------------------------- */
+    const interval =
+      String(
+        req.query.interval ||
+          "1day"
+      ).trim();
 
     try {
-      const history =
-        await getTwelveDataHistory(
-          symbol,
+      /* ---------------------------------------------------
+         VALIDATE INTERVAL
+      --------------------------------------------------- */
+
+      if (
+        !VALID_INTERVALS[
           interval
+        ]
+      ) {
+        return res.status(400).json({
+          success: false,
+
+          message:
+            "Invalid interval. Use 1day, 1week or 1month.",
+
+          history: [],
+        });
+      }
+
+
+      /* ---------------------------------------------------
+         FIND STOCK
+      --------------------------------------------------- */
+
+      const stock =
+        await Stock.findOne({
+          symbol,
+        }).lean();
+
+      if (!stock) {
+        return res.status(404).json({
+          success: false,
+
+          message:
+            "Stock not found",
+
+          history: [],
+        });
+      }
+
+
+      /* ---------------------------------------------------
+         CACHE
+      --------------------------------------------------- */
+
+      const cacheKey =
+        `${symbol}_${interval}`;
+
+      const cached =
+        historyCache.get(
+          cacheKey
         );
 
+      if (
+        cached &&
+        Date.now() -
+          cached.timestamp <
+          HISTORY_CACHE_TIME
+      ) {
+        return res.json(
+          cached.data
+        );
+      }
+
+
+      /* ---------------------------------------------------
+         REAL ANGEL ONE HISTORY
+      --------------------------------------------------- */
+
+      const history =
+        await getAngelOneHistory({
+          stock,
+
+          interval,
+        });
+
+
+      /* ---------------------------------------------------
+         HISTORY SUCCESS
+      --------------------------------------------------- */
+
+      if (
+        history.length > 0
+      ) {
+        const result = {
+          success: true,
+
+          symbol,
+
+          interval,
+
+          source:
+            "Angel One SmartAPI",
+
+          fallback: false,
+
+          restricted: false,
+
+          history,
+        };
+
+        historyCache.set(
+          cacheKey,
+          {
+            timestamp:
+              Date.now(),
+
+            data: result,
+          }
+        );
+
+        return res.json(
+          result
+        );
+      }
+
+
+      /* ---------------------------------------------------
+         NO DATA
+      --------------------------------------------------- */
+
       const result = {
         success: true,
+
         symbol,
+
         interval,
-        source: "Twelve Data",
-        fallback: false,
-        restricted: false,
-        history,
-      };
 
-      historyCache.set(cacheKey, {
-        timestamp: Date.now(),
-        data: result,
-      });
+        source:
+          "Angel One SmartAPI",
 
-      return res.json(result);
-    } catch (providerError) {
-      console.log(
-        `Twelve Data history unavailable for ${symbol}:`,
-        providerError.message
-      );
-    }
-
-
-    /* -----------------------------------------------------
-       2. Fallback to Meridian PriceHistory
-    ----------------------------------------------------- */
-
-    const storedHistory =
-      await getStoredHistory(
-        symbol,
-        interval
-      );
-
-    if (storedHistory.length > 0) {
-      const result = {
-        success: true,
-        symbol,
-        interval,
-        source: "Meridian snapshots",
         fallback: true,
+
         restricted: false,
-        history: storedHistory,
+
+        history: [],
+
+        message:
+          "Angel One did not return historical candles for this symbol and period.",
       };
 
-      historyCache.set(cacheKey, {
-        timestamp: Date.now(),
-        data: result,
+      historyCache.set(
+        cacheKey,
+        {
+          timestamp:
+            Date.now(),
+
+          data: result,
+        }
+      );
+
+      return res.json(
+        result
+      );
+    } catch (error) {
+      console.error(
+        `Get stock history error for ${symbol}:`,
+        error?.message ||
+          error
+      );
+
+      if (
+        error?.response?.data
+      ) {
+        console.error(
+          "Angel One historical response:",
+          error.response.data
+        );
+      }
+
+      return res.status(500).json({
+        success: false,
+
+        symbol,
+
+        interval,
+
+        message:
+          error?.message ||
+          "Failed to fetch historical data",
+
+        history: [],
       });
-
-      return res.json(result);
     }
-
-
-    /* -----------------------------------------------------
-       3. No history exists yet
-    ----------------------------------------------------- */
-
-    const result = {
-      success: true,
-      symbol,
-      interval,
-      source: "No historical data available yet",
-      fallback: true,
-      restricted: false,
-      history: [],
-      message:
-        "Meridian has not collected enough historical snapshots for this symbol yet.",
-    };
-
-    historyCache.set(cacheKey, {
-      timestamp: Date.now(),
-      data: result,
-    });
-
-    return res.json(result);
-  } catch (error) {
-    console.error(
-      `Get stock history error for ${symbol}:`,
-      error
-    );
-
-    res.status(500).json({
-      success: false,
-      symbol,
-      interval,
-      message:
-        "Failed to fetch historical data",
-      history: [],
-    });
-  }
-};
+  };
 
 
 /* =========================================================
    CLEAR HISTORY CACHE
 ========================================================= */
 
-const clearHistoryCache = () => {
-  historyCache.clear();
-};
+const clearHistoryCache =
+  () => {
+    historyCache.clear();
+  };
 
+
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
   getStocks,
+
   getStock,
+
   getStockHistory,
+
   clearHistoryCache,
 };

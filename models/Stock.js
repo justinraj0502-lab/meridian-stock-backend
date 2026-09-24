@@ -77,6 +77,26 @@ const stockSchema = new mongoose.Schema(
       trim: true,
     },
 
+    /*
+     * Angel One SmartAPI instrument token.
+     * Example: RELIANCE -> 2885
+     */
+    symbolToken: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
+    /*
+     * Angel One trading symbol.
+     * Example: RELIANCE-EQ
+     */
+    tradingSymbol: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
     currency: {
       type: String,
       default: "INR",
@@ -111,4 +131,8 @@ const stockSchema = new mongoose.Schema(
   }
 );
 
-module.exports = mongoose.model("Stock", stockSchema);
+module.exports =
+  mongoose.model(
+    "Stock",
+    stockSchema
+  );
