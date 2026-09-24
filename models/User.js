@@ -57,10 +57,28 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    resetOtpHash: {
+      type: String,
+      default: null,
+    },
+
+    resetOtpExpiresAt: {
+      type: Date,
+      default: null,
+    },
+
+    resetOtpLastSentAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
   }
 );
 
-module.exports = mongoose.model("User", userSchema);
+module.exports = mongoose.model(
+  "User",
+  userSchema
+);

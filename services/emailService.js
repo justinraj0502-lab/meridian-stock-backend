@@ -14,12 +14,14 @@ const sendBrevoEmail = ({
         name: "Meridian Security",
         email: senderEmail,
       },
+
       to: [
         {
           email: to,
           name: name || "Meridian User",
         },
       ],
+
       subject,
       htmlContent: html,
     });
@@ -27,74 +29,115 @@ const sendBrevoEmail = ({
     const request = https.request(
       {
         hostname: "api.brevo.com",
+
         path: "/v3/smtp/email",
+
         method: "POST",
+
         headers: {
           accept: "application/json",
+
           "api-key": apiKey,
-          "content-type": "application/json",
-          "content-length": Buffer.byteLength(data),
+
+          "content-type":
+            "application/json",
+
+          "content-length":
+            Buffer.byteLength(data),
         },
+
         timeout: 30000,
       },
+
       (response) => {
         let body = "";
 
-        response.on("data", (chunk) => {
-          body += chunk.toString();
-        });
-
-        response.on("end", () => {
-          let result = {};
-
-          try {
-            result = body ? JSON.parse(body) : {};
-          } catch {
-            result = {};
+        response.on(
+          "data",
+          (chunk) => {
+            body += chunk.toString();
           }
+        );
 
-          if (
-            response.statusCode >= 200 &&
-            response.statusCode < 300
-          ) {
-            console.log(`✅ OTP email sent to ${to}`);
-            resolve(result);
-            return;
+        response.on(
+          "end",
+          () => {
+            let result = {};
+
+            try {
+              result = body
+                ? JSON.parse(body)
+                : {};
+            } catch {
+              result = {};
+            }
+
+            if (
+              response.statusCode >=
+                200 &&
+              response.statusCode < 300
+            ) {
+              console.log(
+                `✅ Email sent successfully to ${to}`
+              );
+
+              resolve(result);
+
+              return;
+            }
+
+            const error =
+              new Error(
+                result?.message ||
+                  `Brevo error: ${response.statusCode}`
+              );
+
+            error.status =
+              response.statusCode;
+
+            error.response =
+              result;
+
+            reject(error);
           }
-
-          const error = new Error(
-            result?.message ||
-              `Brevo error: ${response.statusCode}`
-          );
-
-          error.status = response.statusCode;
-          error.response = result;
-
-          reject(error);
-        });
+        );
       }
     );
 
-    request.on("timeout", () => {
-      request.destroy();
+    request.on(
+      "timeout",
+      () => {
+        request.destroy();
 
-      const error = new Error(
-        "Brevo request timed out"
-      );
+        const error =
+          new Error(
+            "Brevo request timed out"
+          );
 
-      error.code = "BREVO_TIMEOUT";
+        error.code =
+          "BREVO_TIMEOUT";
 
-      reject(error);
-    });
+        reject(error);
+      }
+    );
 
-    request.on("error", (error) => {
-      reject(error);
-    });
+    request.on(
+      "error",
+      (error) => {
+        reject(error);
+      }
+    );
 
     request.write(data);
+
     request.end();
   });
 };
+
+
+/* =========================================================
+   SEND OTP EMAIL
+========================================================= */
 
 const sendOtpEmail = async ({
   email,
@@ -102,12 +145,16 @@ const sendOtpEmail = async ({
   otp,
   purpose,
 }) => {
-  const apiKey = process.env.BREVO_API_KEY;
+  const apiKey =
+    process.env.BREVO_API_KEY;
+
   const senderEmail =
     process.env.BREVO_SENDER_EMAIL;
 
   if (!apiKey) {
-    throw new Error("BREVO_API_KEY is missing");
+    throw new Error(
+      "BREVO_API_KEY is missing"
+    );
   }
 
   if (!senderEmail) {
@@ -116,31 +163,106 @@ const sendOtpEmail = async ({
     );
   }
 
-  const isRegistration = purpose === "register";
 
-  const subject = isRegistration
-    ? "Verify your Meridian account"
-    : "Your Meridian login verification code";
+  /* =======================================================
+     EMAIL TYPE
+  ======================================================= */
 
-  const title = isRegistration
-    ? "Verify your Meridian account"
-    : "Verify your Meridian login";
+  const isRegistration =
+    purpose === "register";
 
-  const description = isRegistration
-    ? "Use the verification code below to confirm your email address and activate your Meridian account."
-    : "Use the verification code below to complete your Meridian login.";
+  const isLogin =
+    purpose === "login";
+
+  const isForgotPassword =
+    purpose === "forgot-password";
+
+
+  /* =======================================================
+     SUBJECT
+  ======================================================= */
+
+  let subject;
+
+  if (isRegistration) {
+    subject =
+      "Verify your Meridian account";
+  } else if (isLogin) {
+    subject =
+      "Your Meridian login verification code";
+  } else if (isForgotPassword) {
+    subject =
+      "Reset your Meridian password";
+  } else {
+    subject =
+      "Your Meridian verification code";
+  }
+
+
+  /* =======================================================
+     TITLE
+  ======================================================= */
+
+  let title;
+
+  if (isRegistration) {
+    title =
+      "Verify your Meridian account";
+  } else if (isLogin) {
+    title =
+      "Verify your Meridian login";
+  } else if (isForgotPassword) {
+    title =
+      "Reset your Meridian password";
+  } else {
+    title =
+      "Your Meridian verification code";
+  }
+
+
+  /* =======================================================
+     DESCRIPTION
+  ======================================================= */
+
+  let description;
+
+  if (isRegistration) {
+    description =
+      "Use the verification code below to confirm your email address and activate your Meridian account.";
+  } else if (isLogin) {
+    description =
+      "Use the verification code below to complete your Meridian login.";
+  } else if (isForgotPassword) {
+    description =
+      "Use the verification code below to securely reset your Meridian account password.";
+  } else {
+    description =
+      "Use the verification code below to continue.";
+  }
+
+
+  /* =======================================================
+     EMAIL HTML
+  ======================================================= */
 
   const html = `
 <!DOCTYPE html>
+
 <html>
+
 <head>
+
   <meta charset="UTF-8">
+
   <meta
     name="viewport"
     content="width=device-width, initial-scale=1.0"
   >
+
   <title>${title}</title>
+
 </head>
+
 
 <body
   style="
@@ -172,6 +294,9 @@ const sendOtpEmail = async ({
     "
   >
 
+
+    <!-- HEADER -->
+
     <div
       style="
         padding:28px 32px;
@@ -192,6 +317,7 @@ const sendOtpEmail = async ({
         MERIDIAN
       </div>
 
+
       <div
         style="
           font-size:12px;
@@ -204,7 +330,17 @@ const sendOtpEmail = async ({
 
     </div>
 
-    <div style="padding:36px 32px;">
+
+    <!-- CONTENT -->
+
+    <div
+      style="
+        padding:36px 32px;
+      "
+    >
+
+
+      <!-- ICON -->
 
       <div
         style="
@@ -221,8 +357,15 @@ const sendOtpEmail = async ({
           margin-bottom:24px;
         "
       >
-        ✓
+        ${
+          isForgotPassword
+            ? "🔐"
+            : "✓"
+        }
       </div>
+
+
+      <!-- TITLE -->
 
       <h1
         style="
@@ -235,6 +378,9 @@ const sendOtpEmail = async ({
         ${title}
       </h1>
 
+
+      <!-- DESCRIPTION -->
+
       <p
         style="
           margin:0 0 26px;
@@ -243,9 +389,15 @@ const sendOtpEmail = async ({
           line-height:1.7;
         "
       >
+
         Hi ${name || "there"},<br><br>
+
         ${description}
+
       </p>
+
+
+      <!-- OTP -->
 
       <div
         style="
@@ -269,6 +421,7 @@ const sendOtpEmail = async ({
           VERIFICATION CODE
         </div>
 
+
         <div
           style="
             font-size:36px;
@@ -279,6 +432,7 @@ const sendOtpEmail = async ({
         >
           ${otp}
         </div>
+
 
         <div
           style="
@@ -292,6 +446,9 @@ const sendOtpEmail = async ({
 
       </div>
 
+
+      <!-- SECURITY MESSAGE -->
+
       <p
         style="
           margin:0;
@@ -300,11 +457,19 @@ const sendOtpEmail = async ({
           line-height:1.7;
         "
       >
-        If you did not request this verification code,
-        you can safely ignore this email.
+
+        ${
+          isForgotPassword
+            ? "If you did not request a password reset, you can safely ignore this email. Your password will remain unchanged."
+            : "If you did not request this verification code, you can safely ignore this email."
+        }
+
       </p>
 
     </div>
+
+
+    <!-- FOOTER -->
 
     <div
       style="
@@ -315,8 +480,10 @@ const sendOtpEmail = async ({
         line-height:1.6;
       "
     >
+
       This is an automated security email from Meridian.
       Please do not reply to this message.
+
     </div>
 
   </div>
@@ -324,40 +491,69 @@ const sendOtpEmail = async ({
 </div>
 
 </body>
+
 </html>
 `;
 
+
+  /* =======================================================
+     SEND THROUGH BREVO
+  ======================================================= */
+
   return sendBrevoEmail({
     apiKey,
+
     senderEmail,
+
     to: email,
+
     name,
+
     subject,
+
     html,
   });
 };
 
-const verifyEmailTransport = async () => {
-  if (!process.env.BREVO_API_KEY) {
-    throw new Error("BREVO_API_KEY is missing");
-  }
 
-  if (!process.env.BREVO_SENDER_EMAIL) {
-    throw new Error(
-      "BREVO_SENDER_EMAIL is missing"
+/* =========================================================
+   VERIFY EMAIL SERVICE
+========================================================= */
+
+const verifyEmailTransport =
+  async () => {
+
+    if (
+      !process.env.BREVO_API_KEY
+    ) {
+      throw new Error(
+        "BREVO_API_KEY is missing"
+      );
+    }
+
+    if (
+      !process.env.BREVO_SENDER_EMAIL
+    ) {
+      throw new Error(
+        "BREVO_SENDER_EMAIL is missing"
+      );
+    }
+
+    console.log(
+      "✅ Brevo email service configured successfully"
     );
-  }
 
-  console.log(
-    "✅ Brevo email service configured successfully"
-  );
+    console.log(
+      `📧 Sender: ${process.env.BREVO_SENDER_EMAIL}`
+    );
 
-  console.log(
-    `📧 Sender: ${process.env.BREVO_SENDER_EMAIL}`
-  );
+    return true;
+  };
 
-  return true;
-};
+
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
   sendOtpEmail,

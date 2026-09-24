@@ -5,6 +5,9 @@ const {
   verifyRegistrationOtp,
   login,
   verifyLoginOtp,
+  forgotPassword,
+  verifyForgotPasswordOtp,
+  resetPassword,
   resendOtp,
 } = require("../controllers/authController");
 
@@ -28,6 +31,21 @@ router.post(
 router.post(
   "/login/verify",
   verifyLoginOtp
+);
+
+router.post(
+  "/forgot-password",
+  forgotPassword
+);
+
+router.post(
+  "/forgot-password/verify",
+  verifyForgotPasswordOtp
+);
+
+router.post(
+  "/forgot-password/reset",
+  resetPassword
 );
 
 router.post(

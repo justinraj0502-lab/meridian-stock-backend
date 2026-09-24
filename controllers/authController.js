@@ -24,7 +24,9 @@ const generateToken = (userId) => {
 };
 
 const generateOtp = () => {
-  return crypto.randomInt(100000, 1000000).toString();
+  return crypto
+    .randomInt(100000, 1000000)
+    .toString();
 };
 
 const hashOtp = (otp) => {
@@ -107,9 +109,9 @@ const sendVerificationOtp = async (
   }
 };
 
-// =========================================
-// REGISTER
-// =========================================
+/* =========================================================
+   REGISTER
+========================================================= */
 
 const register = async (req, res) => {
   try {
@@ -161,7 +163,6 @@ const register = async (req, res) => {
       email: normalizedEmail,
     });
 
-    // Existing verified account
     if (
       user &&
       user.emailVerified
@@ -173,7 +174,6 @@ const register = async (req, res) => {
       });
     }
 
-    // Existing unverified registration
     if (user && !user.emailVerified) {
       user.name = normalizedName;
 
@@ -192,7 +192,8 @@ const register = async (req, res) => {
       user = new User({
         name: normalizedName,
         email: normalizedEmail,
-        password: hashedPassword,
+        password:
+          hashedPassword,
         emailVerified: false,
       });
     }
@@ -235,9 +236,9 @@ const register = async (req, res) => {
   }
 };
 
-// =========================================
-// VERIFY REGISTRATION OTP
-// =========================================
+/* =========================================================
+   VERIFY REGISTRATION OTP
+========================================================= */
 
 const verifyRegistrationOtp =
   async (req, res) => {
@@ -362,9 +363,9 @@ const verifyRegistrationOtp =
     }
   };
 
-// =========================================
-// LOGIN
-// =========================================
+/* =========================================================
+   LOGIN
+========================================================= */
 
 const login = async (req, res) => {
   try {
@@ -477,9 +478,9 @@ const login = async (req, res) => {
   }
 };
 
-// =========================================
-// VERIFY LOGIN OTP
-// =========================================
+/* =========================================================
+   VERIFY LOGIN OTP
+========================================================= */
 
 const verifyLoginOtp =
   async (req, res) => {
@@ -601,9 +602,374 @@ const verifyLoginOtp =
     }
   };
 
-// =========================================
-// RESEND OTP
-// =========================================
+/* =========================================================
+   FORGOT PASSWORD
+========================================================= */
+
+const forgotPassword =
+  async (req, res) => {
+    try {
+      const { email } =
+        req.body;
+
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Email is required",
+        });
+      }
+
+      const normalizedEmail =
+        email.trim().toLowerCase();
+
+      if (
+        !isValidEmail(
+          normalizedEmail
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Please enter a valid email address",
+        });
+      }
+
+      const user =
+        await User.findOne({
+          email: normalizedEmail,
+        });
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "No account found with this email",
+        });
+      }
+
+      if (!user.emailVerified) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Please verify your email first",
+        });
+      }
+
+      const now = Date.now();
+
+      if (
+        user.resetOtpLastSentAt
+      ) {
+        const elapsed =
+          (now -
+            new Date(
+              user.resetOtpLastSentAt
+            ).getTime()) /
+          1000;
+
+        if (
+          elapsed <
+          OTP_RESEND_SECONDS
+        ) {
+          const remaining =
+            Math.ceil(
+              OTP_RESEND_SECONDS -
+                elapsed
+            );
+
+          return res.status(429).json({
+            success: false,
+            message:
+              `Please wait ${remaining} seconds before requesting another OTP`,
+          });
+        }
+      }
+
+      const otp =
+        generateOtp();
+
+      user.resetOtpHash =
+        hashOtp(otp);
+
+      user.resetOtpExpiresAt =
+        new Date(
+          now +
+            OTP_EXPIRY_MINUTES *
+              60 *
+              1000
+        );
+
+      user.resetOtpLastSentAt =
+        new Date();
+
+      await user.save();
+
+      try {
+        await sendOtpEmail({
+          email: user.email,
+          name: user.name,
+          otp,
+          purpose:
+            "forgot-password",
+        });
+      } catch (error) {
+        user.resetOtpHash = null;
+        user.resetOtpExpiresAt =
+          null;
+        user.resetOtpLastSentAt =
+          null;
+
+        await user.save();
+
+        throw error;
+      }
+
+      res.status(200).json({
+        success: true,
+        message:
+          "Password reset code sent to your email",
+        email: user.email,
+      });
+    } catch (error) {
+      console.error(
+        "Forgot password error:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Unable to send password reset code",
+      });
+    }
+  };
+
+/* =========================================================
+   VERIFY FORGOT PASSWORD OTP
+========================================================= */
+
+const verifyForgotPasswordOtp =
+  async (req, res) => {
+    try {
+      const {
+        email,
+        otp,
+      } = req.body;
+
+      if (!email || !otp) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Email and OTP are required",
+        });
+      }
+
+      const normalizedEmail =
+        email.trim().toLowerCase();
+
+      const user =
+        await User.findOne({
+          email: normalizedEmail,
+        });
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "User not found",
+        });
+      }
+
+      if (
+        !user.resetOtpHash ||
+        !user.resetOtpExpiresAt
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "No active password reset code. Please request a new code.",
+        });
+      }
+
+      if (
+        new Date() >
+        new Date(
+          user.resetOtpExpiresAt
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "OTP has expired. Please request a new code.",
+        });
+      }
+
+      const submittedHash =
+        hashOtp(
+          String(otp).trim()
+        );
+
+      if (
+        submittedHash !==
+        user.resetOtpHash
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Invalid verification code",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message:
+          "OTP verified successfully",
+      });
+    } catch (error) {
+      console.error(
+        "Forgot password OTP verification error:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Server error",
+      });
+    }
+  };
+
+/* =========================================================
+   RESET PASSWORD
+========================================================= */
+
+const resetPassword =
+  async (req, res) => {
+    try {
+      const {
+        email,
+        otp,
+        newPassword,
+      } = req.body;
+
+      if (
+        !email ||
+        !otp ||
+        !newPassword
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Email, OTP and new password are required",
+        });
+      }
+
+      if (
+        newPassword.length < 6
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Password must contain at least 6 characters",
+        });
+      }
+
+      const normalizedEmail =
+        email.trim().toLowerCase();
+
+      const user =
+        await User.findOne({
+          email: normalizedEmail,
+        });
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "User not found",
+        });
+      }
+
+      if (
+        !user.resetOtpHash ||
+        !user.resetOtpExpiresAt
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "No active password reset code",
+        });
+      }
+
+      if (
+        new Date() >
+        new Date(
+          user.resetOtpExpiresAt
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "OTP has expired. Please request a new code.",
+        });
+      }
+
+      const submittedHash =
+        hashOtp(
+          String(otp).trim()
+        );
+
+      if (
+        submittedHash !==
+        user.resetOtpHash
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Invalid verification code",
+        });
+      }
+
+      user.password =
+        await bcrypt.hash(
+          newPassword,
+          10
+        );
+
+      user.resetOtpHash =
+        null;
+
+      user.resetOtpExpiresAt =
+        null;
+
+      user.resetOtpLastSentAt =
+        null;
+
+      await user.save();
+
+      res.status(200).json({
+        success: true,
+        message:
+          "Password reset successfully",
+      });
+    } catch (error) {
+      console.error(
+        "Reset password error:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Unable to reset password",
+      });
+    }
+  };
+
+/* =========================================================
+   RESEND OTP
+========================================================= */
 
 const resendOtp = async (
   req,
@@ -624,9 +990,10 @@ const resendOtp = async (
     }
 
     if (
-      !["register", "login"].includes(
-        purpose
-      )
+      ![
+        "register",
+        "login",
+      ].includes(purpose)
     ) {
       return res.status(400).json({
         success: false,
@@ -713,5 +1080,8 @@ module.exports = {
   verifyRegistrationOtp,
   login,
   verifyLoginOtp,
+  forgotPassword,
+  verifyForgotPasswordOtp,
+  resetPassword,
   resendOtp,
 };
