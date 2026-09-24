@@ -36,9 +36,7 @@ app.use(
   })
 );
 
-app.use(
-  express.json()
-);
+app.use(express.json());
 
 /* =========================================
    API ROUTES
@@ -80,6 +78,39 @@ app.get(
 );
 
 /* =========================================
+   EMAIL STATUS CHECK
+========================================= */
+
+app.get(
+  "/api/email-status",
+  async (req, res) => {
+    try {
+      await verifyEmailTransport();
+
+      res.status(200).json({
+        success: true,
+        message:
+          "Email service is connected successfully",
+      });
+    } catch (error) {
+      console.error(
+        "Email status check failed:",
+        error.message
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Email service connection failed",
+        error:
+          error.code ||
+          error.message,
+      });
+    }
+  }
+);
+
+/* =========================================
    MONGODB
 ========================================= */
 
@@ -100,23 +131,58 @@ const connectDB = async () => {
     );
 
     /*
-     * Verify Gmail SMTP before
-     * starting the application services.
+     * Gmail verification is performed
+     * after the server starts so that
+     * SMTP problems cannot delay the
+     * Render health check.
      */
-    try {
-      await verifyEmailTransport();
-    } catch (emailError) {
-      console.error(
-        "⚠️ Email service connection failed:",
-        emailError.message
+
+    setTimeout(async () => {
+      console.log(
+        "📧 Checking Gmail SMTP connection..."
       );
 
-      console.error(
-        "⚠️ Check EMAIL_USER and EMAIL_APP_PASSWORD in .env"
-      );
-    }
+      try {
+        await verifyEmailTransport();
 
+        console.log(
+          "✅ Gmail SMTP is ready"
+        );
+      } catch (emailError) {
+        console.error(
+          "❌ Gmail SMTP check failed"
+        );
+
+        console.error(
+          "Error code:",
+          emailError.code ||
+            "UNKNOWN"
+        );
+
+        console.error(
+          "Error message:",
+          emailError.message
+        );
+
+        console.error(
+          "Command:",
+          emailError.command ||
+            "N/A"
+        );
+
+        console.error(
+          "Response code:",
+          emailError.responseCode ||
+            "N/A"
+        );
+      }
+    }, 3000);
+
+    /*
+     * Start market updater separately.
+     */
     startLiveMarketUpdater();
+
   } catch (error) {
     console.error(
       "❌ MongoDB connection failed:",
@@ -141,6 +207,10 @@ app.listen(
   () => {
     console.log(
       `🚀 Meridian server running on http://localhost:${PORT}`
+    );
+
+    console.log(
+      "🌐 CORS enabled for production frontend"
     );
   }
 );
