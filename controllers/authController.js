@@ -931,14 +931,40 @@ const resetPassword =
         });
       }
 
+      /* =====================================================
+         PREVENT REUSING THE CURRENT PASSWORD
+      ===================================================== */
+
+      const samePassword =
+        await bcrypt.compare(
+          newPassword,
+          user.password
+        );
+
+      if (samePassword) {
+        return res.status(400).json({
+          success: false,
+          code: "PASSWORD_SAME_AS_CURRENT",
+          message:
+            "New password must be different from your current password.",
+        });
+      }
+
+      /* =====================================================
+         SAVE NEW PASSWORD
+      ===================================================== */
+
       user.password =
         await bcrypt.hash(
           newPassword,
           10
         );
 
-      user.resetOtpHash =
-        null;
+      /* =====================================================
+         CONSUME PASSWORD RESET OTP
+      ===================================================== */
+
+      user.resetOtpHash = null;
 
       user.resetOtpExpiresAt =
         null;
