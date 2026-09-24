@@ -1,24 +1,38 @@
 const nodemailer = require("nodemailer");
 
+/* =========================================================
+   GMAIL SMTP CONFIGURATION
+========================================================= */
+
 const createTransporter = () => {
   if (
     !process.env.EMAIL_USER ||
     !process.env.EMAIL_APP_PASSWORD
   ) {
     throw new Error(
-      "EMAIL_USER or EMAIL_APP_PASSWORD is missing from .env"
+      "EMAIL_USER or EMAIL_APP_PASSWORD is missing from environment variables"
     );
   }
 
   return nodemailer.createTransport({
-    service: "gmail",
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
 
     auth: {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_APP_PASSWORD,
     },
+
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 60000,
   });
 };
+
+/* =========================================================
+   SEND OTP EMAIL
+========================================================= */
 
 const sendOtpEmail = async ({
   email,
@@ -28,7 +42,8 @@ const sendOtpEmail = async ({
 }) => {
   const transporter = createTransporter();
 
-  const isRegistration = purpose === "register";
+  const isRegistration =
+    purpose === "register";
 
   const subject = isRegistration
     ? "Verify your Meridian account"
@@ -44,6 +59,7 @@ const sendOtpEmail = async ({
 
   const html = `
     <!DOCTYPE html>
+
     <html>
       <head>
         <meta charset="UTF-8" />
@@ -65,6 +81,7 @@ const sendOtpEmail = async ({
           color:#f4f7fa;
         "
       >
+
         <div
           style="
             width:100%;
@@ -84,6 +101,8 @@ const sendOtpEmail = async ({
             "
           >
 
+            <!-- HEADER -->
+
             <div
               style="
                 padding:28px 32px;
@@ -91,6 +110,7 @@ const sendOtpEmail = async ({
                 background:#101820;
               "
             >
+
               <div
                 style="
                   font-size:13px;
@@ -112,7 +132,10 @@ const sendOtpEmail = async ({
               >
                 STOCK MARKET DASHBOARD
               </div>
+
             </div>
+
+            <!-- CONTENT -->
 
             <div style="padding:36px 32px;">
 
@@ -154,8 +177,11 @@ const sendOtpEmail = async ({
                 "
               >
                 Hi ${name || "there"},<br /><br />
+
                 ${description}
               </p>
+
+              <!-- OTP -->
 
               <div
                 style="
@@ -216,6 +242,8 @@ const sendOtpEmail = async ({
 
             </div>
 
+            <!-- FOOTER -->
+
             <div
               style="
                 padding:20px 32px;
@@ -232,20 +260,36 @@ const sendOtpEmail = async ({
           </div>
 
         </div>
+
       </body>
     </html>
   `;
 
-  await transporter.sendMail({
-    from: `"Meridian Security" <${process.env.EMAIL_USER}>`,
-    to: email,
-    subject,
-    html,
-  });
+  const result =
+    await transporter.sendMail({
+      from: `"Meridian Security" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject,
+      html,
+    });
+
+  console.log(
+    `✅ OTP email sent successfully to ${email}`
+  );
+
+  return result;
 };
+
+/* =========================================================
+   VERIFY EMAIL TRANSPORT
+========================================================= */
 
 const verifyEmailTransport = async () => {
   const transporter = createTransporter();
+
+  console.log(
+    "📧 Testing Gmail SMTP connection..."
+  );
 
   await transporter.verify();
 
@@ -253,6 +297,10 @@ const verifyEmailTransport = async () => {
     "✅ Email service connected successfully"
   );
 };
+
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
   sendOtpEmail,
